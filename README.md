@@ -23,8 +23,8 @@ An intelligent documentation crawler and RAG (Retrieval-Augmented Generation) ag
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/coleam00/ottomator-agents.git
-cd ottomator-agents/crawl4AI-agent
+git clone https://github.com/southbayjay/crawl4AI-agent.git
+cd crawl4AI-agent
 ```
 
 2. Install dependencies (recommended to use a Python virtual environment):

@@ -8,6 +8,7 @@ import json
 import logfire
 from supabase import Client
 from openai import AsyncOpenAI
+from auth import init_auth, is_logged_in, login_signup_page, logout
 
 # Import all the message part classes
 from pydantic_ai.messages import (
@@ -105,6 +106,24 @@ async def run_agent_with_streaming(user_input: str):
 
 
 async def main():
+    st.set_page_config(
+        page_title="Crawl4AI",
+        page_icon="🕷️",
+        layout="wide",
+    )
+    
+    # Initialize authentication
+    init_auth()
+    
+    # Show logout button if logged in
+    if is_logged_in():
+        if st.sidebar.button("Logout"):
+            logout()
+            st.rerun()
+    else:
+        login_signup_page()
+        return
+        
     st.title("Python UV Agentic RAG")
     st.write("Ask any question about Python UV, the hidden truths of the beauty of this framework lie within.")
 

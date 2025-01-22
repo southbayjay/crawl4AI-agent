@@ -80,7 +80,7 @@ async def retrieve_relevant_documentation(ctx: RunContext[PydanticAIDeps], user_
             {
                 'query_embedding': query_embedding,
                 'match_count': 5,
-                'filter': {'source': 'python_uv_docs'}
+                'filter': {'source': 'unblu_docs'}
             }
         ).execute()
         
@@ -113,10 +113,10 @@ async def list_documentation_pages(ctx: RunContext[PydanticAIDeps]) -> List[str]
         List[str]: List of unique URLs for all documentation pages
     """
     try:
-        # Query Supabase for unique URLs where source is python_uv_docs
+        # Query Supabase for unique URLs where source is unblu_docs
         result = ctx.deps.supabase.from_('site_pages') \
             .select('url') \
-            .eq('metadata->>source', 'python_uv_docs') \
+            .eq('metadata->>source', 'unblu_docs') \
             .execute()
         
         if not result.data:
@@ -147,7 +147,7 @@ async def get_page_content(ctx: RunContext[PydanticAIDeps], url: str) -> str:
         result = ctx.deps.supabase.from_('site_pages') \
             .select('title, content, chunk_number') \
             .eq('url', url) \
-            .eq('metadata->>source', 'python_uv_docs') \
+            .eq('metadata->>source', 'unblu_docs') \
             .order('chunk_number') \
             .execute()
         

@@ -122,7 +122,7 @@ async def process_chunk(chunk: str, chunk_number: int, url: str) -> ProcessedChu
     
     # Create metadata
     metadata = {
-        "source": "python_uv_docs",
+        "source": "unblu_docs",
         "chunk_size": len(chunk),
         "crawled_at": datetime.now(timezone.utc).isoformat(),
         "url_path": urlparse(url).path
@@ -212,9 +212,9 @@ async def crawl_parallel(urls: List[str], max_concurrent: int = 5):
     finally:
         await crawler.close()
 
-def get_python_uv_docs_urls() -> List[str]:
-    """Get URLs from Python UV docs sitemap."""
-    sitemap_url = "https://docs.astral.sh/uv/sitemap.xml"
+def get_unblu_docs_urls() -> List[str]:
+    """Get URLs from Unblu docs sitemap."""
+    sitemap_url = "https://docs.unblu.com/en/docs/latest/sitemap.xml"
     try:
         response = requests.get(sitemap_url)
         response.raise_for_status()
@@ -233,7 +233,7 @@ def get_python_uv_docs_urls() -> List[str]:
 
 async def main():
     # Get URLs from Pydantic AI docs
-    urls = get_python_uv_docs_urls()
+    urls = get_unblu_docs_urls()
     if not urls:
         print("No URLs found to crawl")
         return

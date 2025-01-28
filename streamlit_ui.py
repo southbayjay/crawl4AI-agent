@@ -9,6 +9,8 @@ import logfire
 from supabase import Client
 from openai import AsyncOpenAI
 from auth import init_auth, is_logged_in, login_signup_page, logout
+from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai.models.openai import OpenAIModel
 
 # Import all the message part classes
 from pydantic_ai.messages import (
@@ -66,7 +68,7 @@ def display_message_part(part):
             st.markdown(part.content)          
 
 
-async def run_agent_with_streaming(user_input: str):
+async def run_agent_with_streaming(user_input: str, selected_table: str):
     """
     Run the agent with streaming text for the user_input prompt,
     while maintaining the entire conversation in `st.session_state.messages`.
@@ -105,9 +107,58 @@ async def run_agent_with_streaming(user_input: str):
         )
 
 
+def get_available_websites():
+    """Fetch available websites from the database."""
+    try:
+        websites = supabase.from_("websites").select("*").execute()
+        return {w['name']: w['table_name'] for w in websites.data}
+    except Exception as e:
+        st.error(f"Error fetching websites: {str(e)}")
+        return {}
+
+
+async def process_query(query: str, selected_table: str):
+    try:
+        # Get the embedding for the query
+        embedding_response = await openai_client.embeddings.create(
+            model="text-embedding-ada-002",
+            input=query
+        )
+        embedding = embedding_response.data[0].embedding
+        
+        # Search the selected table
+        results = supabase.rpc(
+            f'match_{selected_table}',
+            {
+                'query_embedding': embedding,
+                'match_count': 5,
+                'similarity_threshold': 0.5
+            }
+        ).execute()
+        
+        if not results.data:
+            return f"No relevant documentation found in {selected_table}."
+            
+        # Format results
+        formatted_results = []
+        for result in results.data:
+            formatted_results.append(
+                f"From {result['url']} (Chunk {result['chunk_number']}):\n"
+                f"Title: {result['title']}\n"
+                f"Summary: {result['summary']}\n"
+                f"Content: {result['content']}\n"
+                f"Similarity: {result['similarity']:.2f}"
+            )
+        
+        return "\n\n".join(formatted_results)
+        
+    except Exception as e:
+        return f"Error processing query: {str(e)}"
+
+
 async def main():
     st.set_page_config(
-        page_title="Crawl4AI",
+        page_title="Documentation Search",
         page_icon="🕷️",
         layout="wide",
     )
@@ -124,13 +175,26 @@ async def main():
         login_signup_page()
         return
         
-    st.title("Unblu Agentic RAG")
+    st.title("Documentation Search")
     st.write("Ask any question about Unblu, the hidden truths of the beauty of this framework lie within.")
 
     # Initialize chat history in session state if not present
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # Add website selector
+    websites = get_available_websites()
+    if not websites:
+        st.error("No websites available. Please ensure the websites table is properly set up.")
+        return
+        
+    selected_website = st.sidebar.selectbox(
+        "Select Documentation Source", 
+        options=list(websites.keys()),
+        key="selected_website"
+    )
+    selected_table = websites[selected_website]
+    
     # Display all messages from the conversation so far
     # Each message is either a ModelRequest or ModelResponse.
     # We iterate over their parts to decide how to display them.
@@ -155,7 +219,11 @@ async def main():
         # Display the assistant's partial response while streaming
         with st.chat_message("assistant"):
             # Actually run the agent now, streaming the text
-            await run_agent_with_streaming(user_input)
+            await run_agent_with_streaming(user_input, selected_table)
+
+        # Process the query
+        result = await process_query(user_input, selected_table)
+        st.write(result)
 
 
 if __name__ == "__main__":

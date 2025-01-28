@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import html2text
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from openai import AsyncOpenAI
 from supabase import create_client, Client
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -114,132 +116,140 @@ async def get_embedding(text: str) -> List[float]:
 
 async def process_chunk(chunk: str, chunk_number: int, url: str) -> ProcessedChunk:
     """Process a single chunk of text."""
-    # Get title and summary
-    extracted = await get_title_and_summary(chunk, url)
-    
-    # Get embedding
-    embedding = await get_embedding(chunk)
-    
-    # Create metadata
-    metadata = {
-        "source": "unblu_docs",
-        "chunk_size": len(chunk),
-        "crawled_at": datetime.now(timezone.utc).isoformat(),
-        "url_path": urlparse(url).path
-    }
-    
-    return ProcessedChunk(
-        url=url,
-        chunk_number=chunk_number,
-        title=extracted['title'],
-        summary=extracted['summary'],
-        content=chunk,  # Store the original chunk content
-        metadata=metadata,
-        embedding=embedding
-    )
+    try:
+        title, summary = await get_title_and_summary(chunk, url)
+        embedding = await get_embedding(chunk)
+        
+        return ProcessedChunk(
+            url=url,
+            chunk_number=chunk_number,
+            title=title,
+            summary=summary,
+            content=chunk,
+            metadata={
+                "source": "python_uv_docs",
+                "url": url,
+                "chunk_number": chunk_number,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            embedding=embedding
+        )
+    except Exception as e:
+        print(f"Error processing chunk {chunk_number} from {url}: {str(e)}")
+        return None
 
-async def insert_chunk(chunk: ProcessedChunk):
+def get_table_name() -> str:
+    """Get the table name from command line arguments."""
+    if len(sys.argv) < 2:
+        print("Please provide the table name as an argument")
+        print("Usage: python crawl_pydantic_ai_docs.py <table_name>")
+        sys.exit(1)
+    return sys.argv[1]
+
+async def insert_chunk(chunk: ProcessedChunk, table_name: str):
     """Insert a processed chunk into Supabase."""
     try:
         data = {
-            "url": chunk.url,
-            "chunk_number": chunk.chunk_number,
-            "title": chunk.title,
-            "summary": chunk.summary,
-            "content": chunk.content,
-            "metadata": chunk.metadata,
-            "embedding": chunk.embedding
+            'url': chunk.url,
+            'chunk_number': chunk.chunk_number,
+            'title': chunk.title,
+            'summary': chunk.summary,
+            'content': chunk.content,
+            'metadata': chunk.metadata,
+            'embedding': chunk.embedding,
+            'created_at': datetime.now(timezone.utc).isoformat()
         }
         
-        result = supabase.table("site_pages").insert(data).execute()
+        result = supabase.table(table_name).insert(data).execute()
         print(f"Inserted chunk {chunk.chunk_number} for {chunk.url}")
         return result
     except Exception as e:
         print(f"Error inserting chunk: {e}")
         return None
 
-async def process_and_store_document(url: str, markdown: str):
+async def process_and_store_document(url: str, markdown: str, table_name: str):
     """Process a document and store its chunks in parallel."""
-    # Split into chunks
-    chunks = chunk_text(markdown)
-    
-    # Process chunks in parallel
-    tasks = [
-        process_chunk(chunk, i, url) 
-        for i, chunk in enumerate(chunks)
-    ]
-    processed_chunks = await asyncio.gather(*tasks)
-    
-    # Store chunks in parallel
-    insert_tasks = [
-        insert_chunk(chunk) 
-        for chunk in processed_chunks
-    ]
-    await asyncio.gather(*insert_tasks)
-
-async def crawl_parallel(urls: List[str], max_concurrent: int = 5):
-    """Crawl multiple URLs in parallel with a concurrency limit."""
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        extra_args=["--disable-gpu", "--disable-dev-shm-usage", "--no-sandbox"],
-    )
-    crawl_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-
-    # Create the crawler instance
-    crawler = AsyncWebCrawler(config=browser_config)
-    await crawler.start()
-
     try:
-        # Create a semaphore to limit concurrency
+        chunks = chunk_text(markdown)
+        tasks = []
+        
+        for i, chunk in enumerate(chunks):
+            processed = await process_chunk(chunk, i, url)
+            if processed:
+                tasks.append(insert_chunk(processed, table_name))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
+            print(f"Processed and stored all chunks for {url}")
+    except Exception as e:
+        print(f"Error processing document: {e}")
+
+async def crawl_parallel(urls: List[str], table_name: str, max_concurrent: int = 5):
+    """Crawl multiple URLs in parallel with a concurrency limit."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+        
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def process_url(url: str):
             async with semaphore:
-                result = await crawler.arun(
-                    url=url,
-                    config=crawl_config,
-                    session_id="session1"
-                )
-                if result.success:
-                    print(f"Successfully crawled: {url}")
-                    await process_and_store_document(url, result.markdown_v2.raw_markdown)
-                else:
-                    print(f"Failed: {url} - Error: {result.error_message}")
+                try:
+                    print(f"Crawling {url}")
+                    page = await context.new_page()
+                    await page.goto(url)
+                    content = await page.content()
+                    await page.close()
+                    
+                    # Convert HTML to markdown
+                    soup = BeautifulSoup(content, 'lxml')
+                    h = html2text.HTML2Text()
+                    h.ignore_links = False
+                    markdown = h.handle(str(soup))
+                    
+                    if markdown:
+                        await process_and_store_document(url, markdown, table_name)
+                    else:
+                        print(f"Failed to get markdown for {url}")
+                except Exception as e:
+                    print(f"Error processing {url}: {str(e)}")
         
-        # Process all URLs in parallel with limited concurrency
-        await asyncio.gather(*[process_url(url) for url in urls])
-    finally:
-        await crawler.close()
+        try:
+            tasks = [process_url(url) for url in urls]
+            await asyncio.gather(*tasks)
+        finally:
+            await context.close()
+            await browser.close()
 
-def get_unblu_docs_urls() -> List[str]:
-    """Get URLs from Unblu docs sitemap."""
-    sitemap_url = "https://docs.unblu.com/en/docs/latest/sitemap.xml"
+async def get_python_uv_urls() -> List[str]:
+    """Get URLs from Python UV docs sitemap."""
     try:
-        response = requests.get(sitemap_url)
-        response.raise_for_status()
-        
-        # Parse the XML
-        root = ElementTree.fromstring(response.content)
-        
-        # Extract all URLs from the sitemap
-        namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-        urls = [loc.text for loc in root.findall('.//ns:loc', namespace)]
-        
-        return urls
+        response = requests.get("https://docs.astral.sh/uv/sitemap.xml")
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'xml')
+            urls = [loc.text for loc in soup.find_all('loc')]
+            return urls
+        else:
+            print(f"Failed to fetch sitemap: {response.status_code}")
+            return []
     except Exception as e:
-        print(f"Error fetching sitemap: {e}")
+        print(f"Error fetching sitemap: {str(e)}")
         return []
 
 async def main():
-    # Get URLs from Pydantic AI docs
-    urls = get_unblu_docs_urls()
+    """Main entry point."""
+    table_name = get_table_name()
+    
+    # Get URLs from sitemap
+    urls = await get_python_uv_urls()
     if not urls:
-        print("No URLs found to crawl")
+        print("No URLs found in sitemap")
         return
     
-    print(f"Found {len(urls)} URLs to crawl")
-    await crawl_parallel(urls)
+    print(f"Starting crawl for {table_name} with {len(urls)} URLs")
+    await crawl_parallel(urls, table_name)
 
 if __name__ == "__main__":
     asyncio.run(main())

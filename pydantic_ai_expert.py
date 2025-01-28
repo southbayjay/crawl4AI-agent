@@ -24,6 +24,7 @@ logfire.configure(send_to_logfire='if-token-present')
 class PydanticAIDeps:
     supabase: Client
     openai_client: AsyncOpenAI
+    table_name: str = "pydantic_ai_docs"  # Default to PydanticAI docs
 
 system_prompt = """
 You are an expert at Python UV - a Python AI agent framework that you have access to all the documentation to,
@@ -74,18 +75,18 @@ async def retrieve_relevant_documentation(ctx: RunContext[PydanticAIDeps], user_
         # Get the embedding for the query
         query_embedding = await get_embedding(user_query, ctx.deps.openai_client)
         
-        # Query Supabase for relevant documents
+        # Query Supabase for relevant documents using the specified table
         result = ctx.deps.supabase.rpc(
-            'match_site_pages',
+            f'match_{ctx.deps.table_name}',
             {
                 'query_embedding': query_embedding,
                 'match_count': 5,
-                'filter': {'source': 'unblu_docs'}
+                'similarity_threshold': 0.5
             }
         ).execute()
         
         if not result.data:
-            return "No relevant documentation found."
+            return f"No relevant documentation found in {ctx.deps.table_name}."
             
         # Format the results
         formatted_chunks = []
@@ -93,7 +94,13 @@ async def retrieve_relevant_documentation(ctx: RunContext[PydanticAIDeps], user_
             chunk_text = f"""
 # {doc['title']}
 
+URL: {doc['url']}
+Summary: {doc['summary']}
+
+Content:
 {doc['content']}
+
+Similarity: {doc['similarity']:.2f}
 """
             formatted_chunks.append(chunk_text)
             
@@ -101,33 +108,25 @@ async def retrieve_relevant_documentation(ctx: RunContext[PydanticAIDeps], user_
         return "\n\n---\n\n".join(formatted_chunks)
         
     except Exception as e:
-        print(f"Error retrieving documentation: {e}")
         return f"Error retrieving documentation: {str(e)}"
 
 @pydantic_ai_expert.tool
 async def list_documentation_pages(ctx: RunContext[PydanticAIDeps]) -> List[str]:
     """
-    Retrieve a list of all available Pydantic AI documentation pages.
+    Retrieve a list of all available documentation pages.
     
     Returns:
         List[str]: List of unique URLs for all documentation pages
     """
     try:
-        # Query Supabase for unique URLs where source is unblu_docs
-        result = ctx.deps.supabase.from_('site_pages') \
-            .select('url') \
-            .eq('metadata->>source', 'unblu_docs') \
-            .execute()
-        
-        if not result.data:
-            return []
-            
-        # Extract unique URLs
-        urls = sorted(set(doc['url'] for doc in result.data))
-        return urls
-        
+        result = ctx.deps.supabase.table(ctx.deps.table_name).select('url').execute()
+        if result.data:
+            # Get unique URLs
+            urls = list(set(doc['url'] for doc in result.data))
+            return sorted(urls)
+        return []
     except Exception as e:
-        print(f"Error retrieving documentation pages: {e}")
+        print(f"Error listing documentation pages: {e}")
         return []
 
 @pydantic_ai_expert.tool
@@ -143,28 +142,27 @@ async def get_page_content(ctx: RunContext[PydanticAIDeps], url: str) -> str:
         str: The complete page content with all chunks combined in order
     """
     try:
-        # Query Supabase for all chunks of this URL, ordered by chunk_number
-        result = ctx.deps.supabase.from_('site_pages') \
-            .select('title, content, chunk_number') \
-            .eq('url', url) \
-            .eq('metadata->>source', 'unblu_docs') \
-            .order('chunk_number') \
+        result = ctx.deps.supabase.table(ctx.deps.table_name)\
+            .select('*')\
+            .eq('url', url)\
+            .order('chunk_number')\
             .execute()
-        
+            
         if not result.data:
             return f"No content found for URL: {url}"
             
-        # Format the page with its title and all chunks
-        page_title = result.data[0]['title'].split(' - ')[0]  # Get the main title
-        formatted_content = [f"# {page_title}\n"]
+        # Combine all chunks in order
+        chunks = sorted(result.data, key=lambda x: x['chunk_number'])
+        content_parts = []
         
-        # Add each chunk's content
-        for chunk in result.data:
-            formatted_content.append(chunk['content'])
+        for chunk in chunks:
+            content_parts.append(f"""
+# {chunk['title']} (Chunk {chunk['chunk_number']})
+
+{chunk['content']}
+""")
             
-        # Join everything together
-        return "\n\n".join(formatted_content)
+        return "\n\n".join(content_parts)
         
     except Exception as e:
-        print(f"Error retrieving page content: {e}")
         return f"Error retrieving page content: {str(e)}"
